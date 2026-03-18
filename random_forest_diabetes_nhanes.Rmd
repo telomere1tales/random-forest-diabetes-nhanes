@@ -1,0 +1,275 @@
+---
+title: "random_forest_diabetes"
+author: "Noelia Caba Martin"
+date: "2026-03-17"
+output: html_document
+---
+
+## Introduction
+
+Random Forest is an ensemble machine learning algorithm that builds 
+multiple decision trees and combines their predictions through majority 
+voting. It is widely used in clinical research for classification and 
+prediction tasks due to its high accuracy, robustness to outliers, and 
+ability to handle non-linear relationships.
+
+In this analysis, we use Random Forest to build a **diabetes prediction 
+model** using clinical and demographic variables from the NHANES dataset. 
+The model will be evaluated using standard classification metrics.
+
+**Research question:** Can we accurately predict diabetes status from 
+clinical and demographic variables?
+
+The main objectives are:
+
+- Prepare and split the data into training and test sets
+- Train a Random Forest classification model
+- Evaluate model performance using accuracy, sensitivity, specificity 
+and AUC-ROC
+- Identify the most important predictors of diabetes
+
+## Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+```{r libraries}
+library(randomForest)
+library(caret)
+library(pROC)
+library(vip)
+library(tidyverse)
+library(ggplot2)
+library(NHANES)
+```
+
+## Data Preparation
+
+We use the same NHANES dataset from the previous project, applying 
+the same cleaning steps to ensure consistency. The dataset is then 
+split into **training (70%)** and **test (30%)** sets.
+
+The training set is used to build the model, while the test set is 
+used to evaluate its performance on unseen data. This prevents 
+overfitting — a common problem where a model performs well on 
+training data but poorly on new data.
+
+```{r data-preparation}
+# Load and clean data
+set.seed(123)
+
+data(NHANES)
+
+nhanes_rf <- NHANES %>%
+  select(Gender, Age, Race1, BMI, BPSysAve, 
+         BPDiaAve, TotChol, PhysActive, 
+         SleepHrsNight, Diabetes) %>%
+  distinct() %>%
+  filter(!is.na(Diabetes)) %>%
+  filter(!is.na(BMI)) %>%
+  filter(!is.na(BPSysAve)) %>%
+  filter(!is.na(TotChol)) %>%
+  filter(!is.na(PhysActive)) %>%
+  drop_na()
+
+# Check dimensions and class balance
+dim(nhanes_rf)
+table(nhanes_rf$Diabetes)
+
+# Split into training and test sets (70/30)
+train_index <- createDataPartition(nhanes_rf$Diabetes, 
+                                   p = 0.7, 
+                                   list = FALSE)
+train_data <- nhanes_rf[train_index, ]
+test_data <- nhanes_rf[-train_index, ]
+
+cat("Training set:", nrow(train_data), "observations\n")
+cat("Test set:", nrow(test_data), "observations\n")
+```
+
+The cleaned dataset contains **4,515 participants** with complete data 
+for all selected variables. The dataset shows class imbalance, with 
+89.5% non-diabetic and 10.5% diabetic participants.
+
+The data was split into:
+- **Training set:** 3,162 observations (70%)
+- **Test set:** 1,353 observations (30%)
+
+`createDataPartition()` ensures that the class distribution is 
+preserved in both sets (stratified splitting).
+
+## Model Training
+
+### Class Imbalance
+
+Before training, it is important to address the class imbalance. 
+If left unaddressed, the model may achieve high overall accuracy 
+simply by predicting "No diabetes" for all participants, without 
+learning meaningful patterns.
+
+We will use **class weights** to penalize misclassification of the 
+minority class (diabetes) more heavily than the majority class.
+
+```{r train-model}
+# Define class weights to handle imbalance
+class_weights <- c("No" = 1, "Yes" = 10)
+
+# Train Random Forest model
+set.seed(123)
+rf_model <- randomForest(
+  Diabetes ~ .,
+  data = train_data,
+  ntree = 500,
+  mtry = 3,
+  importance = TRUE,
+  classwt = class_weights
+)
+
+# Print model summary
+print(rf_model)
+```
+
+The Random Forest model was trained on 3,162 observations using 500 
+trees and 3 variables per split.
+
+The OOB error rate of **10.5%** provides an unbiased estimate of 
+model performance. However, the confusion matrix reveals a common 
+challenge with imbalanced datasets: while the model correctly 
+classifies 99.4% of non-diabetic cases, it only identifies 5.7% 
+of diabetic cases correctly.
+
+This highlights the importance of using multiple evaluation metrics 
+beyond overall accuracy when dealing with imbalanced classification problems.
+
+## Model Evaluation
+
+We evaluate the model on the **test set** — data the model has never 
+seen during training. This gives an unbiased estimate of real-world 
+performance.
+
+We use the following metrics:
+
+- **Accuracy:** overall proportion of correct predictions
+- **Sensitivity (Recall):** proportion of diabetic cases correctly identified
+- **Specificity:** proportion of non-diabetic cases correctly identified
+- **AUC-ROC:** Area Under the ROC Curve — measures the model's ability 
+to discriminate between classes regardless of threshold. Ranges from 
+0.5 (random) to 1.0 (perfect)
+
+```{r model-evaluation}
+# Make predictions on test set
+predictions <- predict(rf_model, test_data)
+probabilities <- predict(rf_model, test_data, type = "prob")
+
+# Confusion matrix
+conf_matrix <- confusionMatrix(predictions, test_data$Diabetes, 
+                                positive = "Yes")
+print(conf_matrix)
+
+# ROC curve
+roc_obj <- roc(test_data$Diabetes, probabilities[, "Yes"])
+
+# Plot ROC curve
+plot(roc_obj,
+     main = paste("ROC Curve - AUC:", round(auc(roc_obj), 3)),
+     col = "#E64B35",
+     lwd = 2,
+     print.auc = TRUE)
+abline(a = 0, b = 1, lty = 2, col = "grey")
+```
+
+The model evaluation on the test set reveals:
+
+- **AUC-ROC = 0.779:** the model shows good discriminative ability, 
+substantially better than random classification (AUC = 0.5)
+- **Balanced Accuracy = 0.537:** reflects the challenge of the 
+imbalanced dataset
+
+The ROC curve shows that the model can achieve reasonable sensitivity 
+while maintaining acceptable specificity, making it potentially useful 
+as a screening tool for diabetes risk.
+
+## Variable Importance
+
+One of the key advantages of Random Forest over other machine learning 
+algorithms is its ability to quantify the **importance of each variable** 
+in making predictions.
+
+Variable importance is measured by:
+
+- **Mean Decrease Accuracy:** how much the model accuracy decreases 
+when a variable is randomly permuted (shuffled). Higher values = 
+more important variable
+- **Mean Decrease Gini:** how much each variable contributes to the 
+purity of the nodes in the trees
+
+```{r variable-importance}
+# Plot variable importance
+vip(rf_model,
+    num_features = 10,
+    aesthetics = list(fill = "#2E9FDF", color = "#2E9FDF", alpha = 0.8)) +
+  theme_minimal() +
+  labs(title = "Variable Importance - Random Forest",
+       subtitle = "Top 10 predictors of diabetes",
+       x = "Importance", y = "Variable")
+```
+
+The variable importance plot reveals that **Age** is by far the strongest 
+predictor of diabetes in this model, followed by Total Cholesterol, 
+Race, and BMI.
+
+Notably, Total Cholesterol ranked as the second most important variable 
+despite not showing a statistically significant difference between groups 
+in the univariate analysis (Table 1). This highlights a key advantage 
+of Random Forest: its ability to capture **non-linear relationships and 
+interactions between variables** that traditional statistical tests may miss.
+
+Physical activity, diastolic blood pressure, and sleep hours show 
+relatively low importance, suggesting they contribute little additional 
+predictive information beyond age and metabolic variables.
+
+## Conclusions
+
+This analysis demonstrates the application of Random Forest machine 
+learning to predict diabetes status from clinical and demographic 
+variables in the NHANES dataset.
+
+**Key findings:**
+
+1. The Random Forest model achieved an **AUC-ROC of 0.779**, indicating 
+good discriminative ability between diabetic and non-diabetic participants 
+using only basic clinical variables.
+
+2. **Age** was the strongest predictor of diabetes, consistent with the 
+well-established increase in type 2 diabetes prevalence with age.
+
+3. **Total Cholesterol** ranked as the second most important predictor 
+despite not showing significant differences in univariate analysis, 
+demonstrating the ability of Random Forest to detect complex non-linear 
+relationships.
+
+4. **BMI and Race** were also important predictors, consistent with 
+known risk factors for type 2 diabetes.
+
+5. Class imbalance (89.5% non-diabetic vs 10.5% diabetic) was addressed 
+using class weights, though it remained a challenge for detecting 
+diabetic cases.
+
+**Limitations:**
+
+- Class imbalance limits the model's sensitivity for detecting diabetic 
+cases — more advanced resampling techniques (SMOTE) could improve this
+- The model was trained on cross-sectional data, preventing causal 
+inference
+- External validation on an independent dataset would be needed before 
+clinical application
+- Only 10 variables were included — additional clinical variables 
+(HbA1c, fasting glucose) would likely improve performance
+
+**Future directions:**
+
+- Apply SMOTE (Synthetic Minority Oversampling Technique) to address 
+class imbalance
+- Compare Random Forest with other algorithms (XGBoost, Logistic 
+Regression)
+- Perform hyperparameter tuning using cross-validation
+- Validate the model on an independent clinical dataset
